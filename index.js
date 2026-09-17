@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 3000;
 
 function buildServer() {
   const server = new McpServer({
-    name: "hello-mcp-server",
+    name: "davenn-mcp",
     version: "1.0.0",
   });
 
@@ -72,7 +72,7 @@ app.delete("/mcp", (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("hello-mcp-server is running. MCP endpoint: POST /mcp");
+  res.send("davenn-mcp is running. MCP endpoint: POST /mcp");
 });
 
 app.listen(PORT, () => {

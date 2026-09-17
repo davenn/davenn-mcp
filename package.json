@@ -1,5 +1,5 @@
 {
-  "name": "hello-mcp-server",
+  "name": "davenn-mcp",
   "version": "1.0.0",
   "description": "Hosted hello-world MCP server",
   "main": "index.js",
