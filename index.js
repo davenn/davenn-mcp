@@ -1,37 +1,30 @@
-import crypto from "node:crypto";
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import {
+  mcpAuthRouter,
+  getOAuthProtectedResourceMetadataUrl,
+} from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { tools } from "./tools/index.js";
+import { createOAuthProvider } from "./lib/oauthProvider.js";
 
 const PORT = process.env.PORT || 3000;
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
+const BASE_URL = process.env.BASE_URL;
 
 if (!MCP_AUTH_TOKEN) {
   console.error("MCP_AUTH_TOKEN is not set. Refusing to start.");
   process.exit(1);
 }
-
-function requireAuth(req, res, next) {
-  const header = req.get("authorization") || "";
-  const [scheme, token] = header.split(" ");
-  const expected = Buffer.from(MCP_AUTH_TOKEN);
-  const provided = Buffer.from(token || "");
-  const valid =
-    scheme === "Bearer" &&
-    provided.length === expected.length &&
-    crypto.timingSafeEqual(provided, expected);
-
-  if (!valid) {
-    res.status(401).json({
-      jsonrpc: "2.0",
-      error: { code: -32001, message: "Unauthorized" },
-      id: null,
-    });
-    return;
-  }
-  next();
+if (!BASE_URL) {
+  console.error("BASE_URL is not set (e.g. https://your-app.onrender.com). Refusing to start.");
+  process.exit(1);
 }
+
+const issuerUrl = new URL(BASE_URL);
+const resourceServerUrl = new URL("/mcp", BASE_URL);
+const oauthProvider = createOAuthProvider();
 
 function buildServer() {
   const server = new McpServer({
@@ -46,7 +39,62 @@ function buildServer() {
   return server;
 }
 
+const requireAuth = requireBearerAuth({
+  verifier: oauthProvider,
+  resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
+});
+
 const app = express();
+
+// Standard OAuth endpoints: /authorize, /token, /register, /revoke, and the
+// .well-known metadata documents clients like Gemini use for discovery.
+app.use(
+  mcpAuthRouter({
+    provider: oauthProvider,
+    issuerUrl,
+    resourceServerUrl,
+    scopesSupported: ["mcp:tools"],
+  }),
+);
+
+// The actual login gate: /authorize renders this form (see oauthProvider.js),
+// which only issues an authorization code once the right token is submitted.
+app.post("/oauth/login", express.urlencoded({ extended: false }), async (req, res) => {
+  const { client_id, redirect_uri, code_challenge, state, scope, resource, token } = req.body;
+
+  const client = await oauthProvider.clientsStore.getClient(client_id);
+  if (!client || !client.redirect_uris.includes(redirect_uri)) {
+    res.status(400).send("Invalid client or redirect_uri.");
+    return;
+  }
+
+  if (!oauthProvider.verifyLoginToken(token)) {
+    res
+      .status(401)
+      .set("Content-Type", "text/html")
+      .send(
+        oauthProvider.renderLoginPage(
+          { client_id, redirect_uri, code_challenge, state, scope, resource },
+          "Incorrect token.",
+        ),
+      );
+    return;
+  }
+
+  const code = oauthProvider.issueAuthorizationCode(client, {
+    redirectUri: redirect_uri,
+    codeChallenge: code_challenge,
+    state: state || undefined,
+    scopes: scope ? scope.split(" ").filter(Boolean) : [],
+    resource: resource ? new URL(resource) : undefined,
+  });
+
+  const target = new URL(redirect_uri);
+  target.searchParams.set("code", code);
+  if (state) target.searchParams.set("state", state);
+  res.redirect(302, target.href);
+});
+
 app.use(express.json());
 
 // Stateless mode: a fresh server + transport per request, no session tracking.
