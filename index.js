@@ -7,7 +7,9 @@ import {
 } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { tools } from "./tools/index.js";
+import { timingSafeEqual } from "node:crypto";
 import { createOAuthProvider } from "./lib/oauthProvider.js";
+import { startGlucosePolling, syncGlucose, getLastSyncResult } from "./lib/glucoseSync.js";
 
 const PORT = process.env.PORT || 3000;
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
@@ -139,10 +141,37 @@ app.delete("/mcp", requireAuth, (req, res) => {
   });
 });
 
+// Lets an external cron drive the poller. Needed on hosts that idle an
+// inactive service out — the request both wakes this process and forces a
+// sync — and harmless where it doesn't, since ingest is idempotent.
+app.post("/poll", async (req, res) => {
+  const secret = process.env.BG_INGEST_SECRET || "";
+  const given = req.get("X-Admin-Secret") || "";
+  const a = Buffer.from(secret);
+  const b = Buffer.from(given);
+  if (!secret || a.length !== b.length || !timingSafeEqual(a, b)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  try {
+    const result = await syncGlucose();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Last sync's outcome, for checking the pipeline is actually alive.
+app.get("/poll/status", (req, res) => {
+  res.json({ lastSync: getLastSyncResult() });
+});
+
 app.get("/", (req, res) => {
   res.send("davenn-mcp is running. MCP endpoint: POST /mcp");
 });
 
 app.listen(PORT, () => {
   console.log(`davenn-mcp listening on port ${PORT}`);
+  startGlucosePolling();
 });
