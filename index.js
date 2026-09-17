@@ -144,12 +144,17 @@ app.delete("/mcp", requireAuth, (req, res) => {
 // Lets an external cron drive the poller. Needed on hosts that idle an
 // inactive service out — the request both wakes this process and forces a
 // sync — and harmless where it doesn't, since ingest is idempotent.
-app.post("/poll", async (req, res) => {
+function pollSecretOk(req) {
   const secret = process.env.BG_INGEST_SECRET || "";
   const given = req.get("X-Admin-Secret") || "";
+  if (!secret) return false;
   const a = Buffer.from(secret);
   const b = Buffer.from(given);
-  if (!secret || a.length !== b.length || !timingSafeEqual(a, b)) {
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+app.post("/poll", async (req, res) => {
+  if (!pollSecretOk(req)) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
@@ -164,6 +169,11 @@ app.post("/poll", async (req, res) => {
 
 // Last sync's outcome, for checking the pipeline is actually alive.
 app.get("/poll/status", (req, res) => {
+  // Gated like /poll: the last result carries timestamps and raw error text.
+  if (!pollSecretOk(req)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
   res.json({ lastSync: getLastSyncResult() });
 });
 
